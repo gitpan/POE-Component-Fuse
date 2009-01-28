@@ -4,13 +4,13 @@ use strict; use warnings;
 
 # Initialize our version
 use vars qw( $VERSION );
-$VERSION = '0.01';
+$VERSION = '0.02';
 
 # We pass in data to POE::Filter::Reference
 use POE::Filter::Reference;
 
 # We communicate with FUSE here
-use Fuse qw( fuse_get_context );
+use POE::Component::Fuse::myFuse qw( fuse_get_context fuse_set_fh );
 
 # Our Filter object
 my $filter = POE::Filter::Reference->new();
@@ -48,7 +48,7 @@ sub receive_master {
 			if ( scalar @$data == 1 ) {
 				return $data->[0];
 			} else {
-				die 'received malformed input';
+				# get more data
 			}
 		}
 	}
@@ -93,7 +93,7 @@ sub start_fuse {
 	}
 
 	# setup FUSE
-	Fuse::main(
+	POE::Component::Fuse::myFuse::main(
 		# basic setup
 		'debug'		=> 0,
 		'threaded'	=> 0,
@@ -112,11 +112,14 @@ sub start_fuse {
 sub fuse_callback {
 	my $type = shift;
 
+	# get the context
+	my $cxt = fuse_get_context();
+
 	# pass it on to our master!
 	send_master( {
 		'TYPE'		=> $type,
 		'ARGS'		=> [ @_ ],
-		'CONTEXT'	=> fuse_get_context(),
+		'CONTEXT'	=> $cxt,
 	} );
 
 	# wait for the reply
@@ -125,6 +128,18 @@ sub fuse_callback {
 	# make sure the type is the same
 	if ( $reply->{'ACTION'} eq 'REPLY' ) {
 		if ( $reply->{'TYPE'} eq $type ) {
+			# Fix up the FH if needed
+			if ( $type eq 'open' and exists $reply->{'FH'} and defined $reply->{'FH'} ) {
+				# compare the data!
+				if ( defined $cxt->{'fh'} ) {
+					if ( $reply->{'FH'} != $cxt->{'fh'} ) {
+						fuse_set_fh( $reply->{'FH'} );
+					}
+				} else {
+					fuse_set_fh( $reply->{'FH'} );
+				}
+			}
+
 			# one-arg check
 			if ( scalar @{ $reply->{'RESULT'} } == 1 ) {
 				return $reply->{'RESULT'}->[0];
@@ -141,14 +156,21 @@ sub fuse_callback {
 
 # End of module
 1;
-
 __END__
 
 =head1 NAME
 
 POE::Component::Fuse::SubProcess - Backend of POE::Component::Fuse
 
+=head1 SYNOPSIS
+
+  Please do not use this module directly.
+
 =head1 ABSTRACT
+
+Please do not use this module directly.
+
+=head1 DESCRIPTION
 
 This module is responsible for implementing the guts of POE::Component::Fuse.
 Namely, the fork/exec and the FUSE eventloop.

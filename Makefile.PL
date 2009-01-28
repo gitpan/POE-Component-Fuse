@@ -8,13 +8,18 @@ WriteMakefile
           'EXE_FILES' => [],
           'VERSION_FROM' => 'lib/POE/Component/Fuse.pm',
           'PREREQ_PM' => {
-                           'Test::More' => '0.86',
+                           'Scalar::Util' => 0,
                            'POE::Wheel::Run' => 0,
                            'POE::Filter::Reference' => 0,
-                           'Fuse' => '0.09',
+                           'Fcntl' => 0,
+                           'Config' => 0,
+                           'Carp' => 0,
+                           'Test::More' => '0.86',
+                           'DynaLoader' => 0,
                            'POE::Session::AttributeBased' => 0,
                            'POE::Session' => 0,
-                           'POE' => 0
+                           'POE' => 0,
+                           'Errno' => 0
                          }
         )
 ;

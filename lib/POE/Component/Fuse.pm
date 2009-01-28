@@ -4,7 +4,7 @@ use strict; use warnings;
 
 # Initialize our version
 use vars qw( $VERSION );
-$VERSION = '0.01';
+$VERSION = '0.02';
 
 # Import what we need from the POE namespace
 use POE;
@@ -13,14 +13,12 @@ use POE::Wheel::Run;
 use POE::Filter::Reference;
 use base 'POE::Session::AttributeBased';
 
+# get some system constants
+use Errno qw( :POSIX );		# ENOENT EISDIR etc
+
 # Set some constants
 BEGIN {
-	# Debug fun!
-	if ( ! defined &DEBUG ) {
-		## no critic
-		eval "sub DEBUG () { 0 }";
-		## use critic
-	}
+	if ( ! defined &DEBUG ) { *DEBUG = sub () { 0 } }
 }
 
 # starts the component!
@@ -63,48 +61,59 @@ sub spawn {
 		if ( DEBUG ) {
 			warn 'Using default VFILESYS = false';
 		}
+	} else {
+		# make sure it's a real object
+		if ( ! ref $opt{'vfilesys'} ) {
+			warn 'The passed-in vfilesys option is not an object';
+			return 0;
+		} else {
+			if ( $opt{'vfilesys'}->isa( 'Filesys::Virtual' ) ) {
+				# Wrap the vfilesys object around the FUSE <-> Filesys::Virtual wrapper
+				require Fuse::Filesys::Virtual;
+				$opt{'vfilesys'} = Fuse::Filesys::Virtual->new( $opt{'vfilesys'}, { 'debug' => 0 } );
+			} else {
+				if ( $opt{'vfilesys'}->isa( 'Filesys::Virtual::Async' ) ) {
+					# wrap it around our internal wrapper
+					require POE::Component::Fuse::AsyncFsV;
+					$opt{'vfilesys'} = POE::Component::Fuse::AsyncFsV->new( $opt{'vfilesys'} );
+				} else {
+					warn 'The passed-in vfilesys object is not a subclass of Filesys::Virtual or Filesys::Virtual::Async';
+					return 0;
+				}
+			}
+		}
+	}
 
-		# setup the session
-		if ( ! exists $opt{'session'} or ! defined $opt{'session'} ) {
+	# setup the session
+	if ( ! exists $opt{'session'} or ! defined $opt{'session'} ) {
+		# did we select vfilesys?
+		if ( ! exists $opt{'vfilesys'} ) {
 			# if we're running under POE, grab the active session
 			$opt{'session'} = $poe_kernel->get_active_session();
 			if ( ! defined $opt{'session'} or $opt{'session'}->isa( 'POE::Kernel' ) ) {
 				warn 'PoCo-Fuse needs a session to send the callbacks to!';
 				return 0;
 			} else {
-				$opt{'session'} = $opt{'session'}->ID();
+				$opt{'session'} = $opt{'session'}->ID;
 			}
-		} else {
-			# TODO validate for sanity
 		}
+	} else {
+		# TODO validate for sanity
+	}
 
-		# setup the callback prefix
-		if ( ! exists $opt{'prefix'} or ! defined $opt{'prefix'} ) {
+	# setup the callback prefix
+	if ( ! exists $opt{'prefix'} or ! defined $opt{'prefix'} ) {
+		# do we even need to set this?
+		if ( exists $opt{'session'} ) {
 			if ( DEBUG ) {
 				warn 'Using default event PREFIX = fuse_';
 			}
 
 			# Set the default
 			$opt{'prefix'} = 'fuse_';
-		} else {
-			# TODO validate for sanity
 		}
 	} else {
-		# make sure it's a real object
-		if ( ! ref $opt{'vfilesys'} or ! $opt{'vfilesys'}->isa( 'Filesys::Virtual' ) ) {
-			warn 'The passed-in vfilesys object is not a subclass of Filesys::Virtual!';
-			return 0;
-		}
-
-		# warn user if they tried to use both vfilesys+session
-		if ( exists $opt{'session'} and defined $opt{'session'} ) {
-			warn 'Setting both VFILESYS+SESSION will not work, choosing VFILESYS over SESSION!';
-		}
-		delete $opt{'session'} if exists $opt{'session'};
-
-		# Wrap the vfilesys object around the FUSE <-> Filesys::Virtual wrapper
-		require Fuse::Filesys::Virtual;
-		$opt{'vfilesys'} = Fuse::Filesys::Virtual->new( $opt{'vfilesys'}, { 'debug' => DEBUG() } );
+		# TODO validate for sanity
 	}
 
 	# should we automatically umount?
@@ -154,6 +163,18 @@ sub spawn {
 		$opt{'mkdir'} = 0;
 	}
 
+	# should we automatically remove the mountpoint?
+	if ( exists $opt{'rmdir'} ) {
+		$opt{'rmdir'} = $opt{'rmdir'} ? 1 : 0;
+	} else {
+		if ( DEBUG ) {
+			warn 'Using default RMDIR = false';
+		}
+
+		# set the default
+		$opt{'rmdir'} = 0;
+	}
+
 	# make sure the mountpoint exists
 	if ( ! -d $opt{'mount'} ) {
 		# does it exist?
@@ -200,10 +221,11 @@ sub spawn {
 			'MOUNT'		=> $opt{'mount'},
 			'MOUNTOPTS'	=> $opt{'mountopts'},
 			'UMOUNT'	=> $opt{'umount'},
-			( exists $opt{'session'} ? (	'PREFIX'	=> $opt{'prefix'},
-							'SESSION'	=> $opt{'session'},
-						) : (	'VFILESYS'	=> $opt{'vfilesys'}, )
-			),
+			'RMDIR'		=> $opt{'rmdir'},
+			( exists $opt{'session'} ? ( 'SESSION' => $opt{'session'} ) : () ),
+			( exists $opt{'prefix'} ? ( 'PREFIX' => $opt{'prefix'} ) : () ),
+
+			( exists $opt{'vfilesys'} ? ( 'VFILESYS' => $opt{'vfilesys'} ) : () ),
 
 			# The Wheel::Run object
 			'WHEEL'		=> undef,
@@ -247,7 +269,14 @@ sub _stop : State {
 	if ( $_[HEAP]->{'UMOUNT'} ) {
 		# FIXME this is bad because it blocks POE but a good temporary solution :(
 		# FIXME make this portable!
-		system("fusermount -u -z $_[HEAP]->{'ALIAS'} >/dev/null 2>&1");
+		system("fusermount -u -z $_[HEAP]->{'MOUNT'} >/dev/null 2>&1");
+	}
+
+	# remove the mountpoint?
+	if ( $_[HEAP]->{'RMDIR'} ) {
+		if ( ! rmdir( $_[HEAP]->{'MOUNT'} ) ) {
+			warn "unable to rmdir mountpoint: $!";
+		}
 	}
 
 	return;
@@ -258,7 +287,7 @@ sub _parent : State {
 
 sub shutdown : State {
 	if ( DEBUG ) {
-		warn "received shutdown signal" . ( defined $_[ARG0] ? ' NOW' : '' );
+		warn "received shutdown signal";
 	}
 
 	# okay, let's shutdown now!
@@ -332,6 +361,7 @@ sub wheel_setup : State {
 		# Set up the SubProcess we communicate with
 		$_[HEAP]->{'WHEEL'} = POE::Wheel::Run->new(
 			# What we will run in the separate process
+			#'Program'	=>	"valgrind --suppressions=/home/apoc/perl.supp --leak-check=full --leak-resolution=high --num-callers=50 $^X -MPOE::Component::Fuse::SubProcess -e 'POE::Component::Fuse::SubProcess::main()'",
 			'Program'	=>	"$^X -MPOE::Component::Fuse::SubProcess -e 'POE::Component::Fuse::SubProcess::main()'",
 
 			# Kill off existing FD's
@@ -403,7 +433,7 @@ sub wheel_stderr : State {
 	# skip empty lines
 	if ( $line ne '' ) {
 		if ( DEBUG ) {
-			warn "received stderr from subprocess: $line";
+			print "received stderr from subprocess: $line\n";
 		}
 	}
 
@@ -422,22 +452,24 @@ sub wheel_stdout : State {
 		# TODO generate some way of matching request with response when we go multithreaded...
 
 		# vfilesys or session?
-		if ( exists $_[HEAP]->{'SESSION'} ) {
+		if ( exists $_[HEAP]->{'VFILESYS'} ) {
+			my $subname = $_[HEAP]->{'VFILESYS'}->can( $data->{'TYPE'} );
+			if ( ! defined $subname ) {
+				$_[KERNEL]->yield( 'reply', [ $data->{'TYPE'}, $data->{'CONTEXT'} ], [ -EIO() ] );
+			} else {
+				if ( $_[HEAP]->{'VFILESYS'}->isa( 'POE::Component::Fuse::AsyncFsV' ) ) {
+					$subname->( $_[HEAP]->{'VFILESYS'}, $data->{'CONTEXT'}, @{ $data->{'ARGS'} } );
+				} else {
+					my @result = $subname->( $_[HEAP]->{'VFILESYS'}, @{ $data->{'ARGS'} } );
+					$_[KERNEL]->yield( 'reply', [ $data->{'TYPE'}, $data->{'CONTEXT'} ], \@result );
+				}
+			}
+		} else {
 			# make the postback
-			my $postback = $_[SESSION]->postback( 'reply', $data->{'TYPE'} );
+			my $postback = $_[SESSION]->postback( 'reply', $data->{'TYPE'}, $data->{'CONTEXT'} );
 
 			# send it to the session!
 			$_[KERNEL]->post( $_[HEAP]->{'SESSION'}, $_[HEAP]->{'PREFIX'} . $data->{'TYPE'}, $postback, $data->{'CONTEXT'}, @{ $data->{'ARGS'} } );
-		} else {
-			# send it to the wrapper!
-			my $subname = $_[HEAP]->{'VFILESYS'}->can( $data->{'TYPE'} );
-			my @result;
-			if ( defined $subname ) {
-				@result = $subname->( $_[HEAP]->{'VFILESYS'}, @{ $data->{'ARGS'} } );
-			} else {
-				@result = ( 0 );	# FIXME: change to EPERM or something
-			}
-			$_[KERNEL]->yield( 'reply', [ $data->{'TYPE'} ], \@result );
 		}
 	} else {
 		if ( DEBUG ) {
@@ -449,7 +481,7 @@ sub wheel_stdout : State {
 }
 
 sub reply : State {
-	my( $orig_data, $result ) = @_[ ARG0 .. ARG2 ];
+	my( $orig_data, $result ) = @_[ ARG0, ARG1 ];
 
 	# send it down the pipe!
 	if ( defined $_[HEAP]->{'WHEEL'} ) {
@@ -459,6 +491,11 @@ sub reply : State {
 			'TYPE'		=> $orig_data->[0],
 			'RESULT'	=> $result,
 		};
+
+		# we pass it back down in case somebody changed fh
+		if ( defined $orig_data->[1] and exists $orig_data->[1]->{'fh'} and defined $orig_data->[1]->{'fh'} ) {
+			$data->{'FH'} = $orig_data->[1]->{'fh'};
+		}
 
 		if ( DEBUG ) {
 			require Data::Dumper;
@@ -687,6 +724,13 @@ WARNING: This is not exactly portable and is in the testing stage. Feedback woul
 
 The default is: false
 
+=head3 rmdir
+
+If true, PoCo-Fuse will attempt to rmdir the mountpoint on exit/shutdown. Extremely useful when you specify a mountpoint
+that was randomly-generated ( e.x. "/tmp/poe$$" ) so we don't "leave behind" lots of empty directories.
+
+WARNING: Be careful when using this or your directory could vanish!
+
 =head3 prefix
 
 The prefix for all events generated by this module when using the "session" method.
@@ -700,22 +744,25 @@ where the events arrive.
 
 If this option is missing ( or POE is not running ) and "vfilesys" isn't enabled spawn() will return failure.
 
-NOTE: You cannot use this and "vfilesys" at the same time! PoCo-Fuse will pick vfilesys over this!
+NOTE: You cannot use this and "vfilesys" at the same time! PoCo-Fuse will pick vfilesys over this! If this is the
+case, then the session will only get the CLOSE event, not API requests.
 
-The default is: calling session ( if POE is running )
+The default is: calling session ( if POE is running ) when "vfilesys" isn't specified or error
 
 =head3 vfilesys
 
-The Filesys::Virtual object to use as our filesystem. PoCo-Fuse will proceed to use L<Fuse::Filesys::Virtual>
+The L<Filesys::Virtual> object to use as our filesystem. PoCo-Fuse will proceed to use L<Fuse::Filesys::Virtual>
 to wrap around it and process the events internally.
+
+Furthermore, you can also use L<Filesys::Virtual::Async> subclasses, this module understands their callback API
+and will process it properly!
 
 If this option is missing and "session" isn't enabled spawn() will return failure.
 
 NOTE: You cannot use this and "session" at the same time! PoCo-Fuse will pick this over session!
 
 Compatibility has not been tested with all Filesys::Virtual::XYZ subclasses, so please let me know if some isn't
-working properly! Furthermore, this doesn't support the "new" Filesys::Virtual::Async API! PoCo-Fuse will do an
-$obj->isa( 'Filesys::Virtual' ) check before accepting the object or return failure if it isn't a subclass.
+working properly!
 
 The default is: not used
 
@@ -759,7 +806,7 @@ utime open read write statfs flush release fsync setxattr getxattr listxattr rem
 =head3 CLOSED
 
 This is a special event sent to the session notifying it of component shutdown. As usual, it will be prefixed by the
-prefix set in the options. If you are using the vfilesys option, this will not be sent anywhere.
+prefix set in the options.
 
 The event handler will get one argument, the error string. If you shut down the component, it will be "shutdown",
 otherwise it will contain some error string. A sample handler is below.
@@ -788,20 +835,15 @@ I'm working on improving this by using XS but it will take me some time seeing h
 FUSE doesn't really help because I have to figure out how to get at the filehandle buried deep in it and expose
 it to POE...
 
-If anybody have the time and knowledge, please help me out and we can have fun converting this to XS!
+If anybody have the time and knowledge, please help me out and we can have fun converting this to a pure XS module!
 
-=head3 Filesys::Virtual::Async
+=head3 Debugging
 
-While the current implementation works nicely, it is acknowledged that there's potential for blockage when
-using the L<Filesys::Virtual> modules. For example, if you use L<Filesys::Virtual::SSH> every time you
-access something, it will make a SSH call over the wire. This will block the entire process until it returns!
+You can enable debug mode which prints out some information ( and especially error messages ) by doing this:
 
-Xantus informed me that there's work going on in the async department and it will rectify this problem. The
-nice thing is that you can easily use the event-based API this module exposes and hook it up to the ::Async
-modules. This means in the future, using L<Filesys::Virtual::Async::SSH> should not block because of the magic
-of callbacks, yay! The design of this module ( by using postbacks ) already nicely accomodates this and all
-that remains is to write the event <-> object wrapper once ::Async gets off the ground :) This would be called
-something like L<Fuse::Filesys::Virtual::Async> or so...
+	sub POE::Component::Fuse::DEBUG () { 1 }
+	use POE::Component::Fuse;
+
 
 =head1 EXPORT
 
@@ -816,6 +858,8 @@ L<Fuse>
 L<Filesys::Virtual>
 
 L<Fuse::Filesys::Virtual>
+
+L<Filesys::Virtual::Async>
 
 =head1 SUPPORT
 
