@@ -4,7 +4,7 @@ use strict; use warnings;
 
 # Initialize our version
 use vars qw( $VERSION );
-$VERSION = '0.04';
+$VERSION = '0.05';
 
 # Import what we need from the POE namespace
 use POE;
@@ -216,7 +216,7 @@ sub spawn {
 
 	# Create our session
 	POE::Session->create(
-		__PACKAGE__->inline_states(),	# FIXME stupid Perl::Critic ## no critic ( RequireExplicitInclusion )
+		__PACKAGE__->inline_states(),	## no critic ( RequireExplicitInclusion )
 		'heap'	=>	{
 			'ALIAS'		=> $opt{'alias'},
 			'MOUNT'		=> $opt{'mount'},
