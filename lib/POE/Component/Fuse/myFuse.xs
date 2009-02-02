@@ -1,6 +1,8 @@
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
+#define NEED_sv_2pv_flags
+#include "../../../../ppport.h"
 
 #ifdef USE_ITHREADS
 # ifdef I_PTHREAD
@@ -72,7 +74,7 @@ int _PLfuse_getattr(const char *file, struct stat *result) {
 		result->st_ctime = POPi;
 		result->st_mtime = POPi;
 		result->st_atime = POPi;
-		result->st_size = POPn;	// we pop double here to support files larger than 4Gb (long limit)
+		result->st_size = POPn;	 /* we pop double here to support files larger than 4Gb (long limit) */
 		result->st_rdev = POPi;
 		result->st_gid = POPi;
 		result->st_uid = POPi;

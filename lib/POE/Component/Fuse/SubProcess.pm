@@ -4,7 +4,7 @@ use strict; use warnings;
 
 # Initialize our version
 use vars qw( $VERSION );
-$VERSION = '0.03';
+$VERSION = '0.04';
 
 # We pass in data to POE::Filter::Reference
 use POE::Filter::Reference;
@@ -84,9 +84,7 @@ sub start_fuse {
 		$callbacks{ $cb } = "POE::Component::Fuse::SubProcess::callback_" . $cb;
 
 		# create the sub!
-		## no critic
-		eval "sub callback_$cb { return fuse_callback( \$cb, \@_ ) }";
-		## use critic
+		eval "sub callback_$cb { return fuse_callback( \$cb, \@_ ) }";	## no critic ( ProhibitStringyEval )
 		if ( $@ ) {
 			die $@;
 		}

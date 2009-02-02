@@ -4,13 +4,14 @@ use strict; use warnings;
 
 # Initialize our version
 use vars qw( $VERSION );
-$VERSION = '0.03';
+$VERSION = '0.04';
 
 # Import what we need from the POE namespace
 use POE;
 use POE::Session;
 use POE::Wheel::Run;
 use POE::Filter::Reference;
+use POE::Filter::Line;
 use base 'POE::Session::AttributeBased';
 
 # get some system constants
@@ -215,7 +216,7 @@ sub spawn {
 
 	# Create our session
 	POE::Session->create(
-		__PACKAGE__->inline_states(),
+		__PACKAGE__->inline_states(),	# FIXME stupid Perl::Critic ## no critic ( RequireExplicitInclusion )
 		'heap'	=>	{
 			'ALIAS'		=> $opt{'alias'},
 			'MOUNT'		=> $opt{'mount'},
@@ -402,6 +403,8 @@ sub wheel_setup : State {
 			'MOUNTOPTS'	=> $_[HEAP]->{'MOUNTOPTS'},
 		} );
 	}
+
+	return;
 }
 
 sub wheel_error : State {
